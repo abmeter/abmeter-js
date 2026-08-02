@@ -13,7 +13,7 @@ npm install abmeter
 Or from the CDN (exposes `window.abmeter`):
 
 ```html
-<script src="https://cdn.jsdelivr.net/npm/abmeter@0.1.0/dist/abmeter.iife.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/abmeter@0.1.1/dist/abmeter.iife.min.js"></script>
 ```
 
 Pin the version. Dropping it — `npm/abmeter/dist/...` — resolves to whatever is
