@@ -9,9 +9,11 @@
 
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { gzipSync } from 'node:zlib';
 import { beforeAll, describe, expect, it } from 'vitest';
+import { VERSION } from '../src/version';
 import { filesFromPackJson, tarballViolations } from './_packaging_allowlists.mjs';
 
 const SDK_ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -39,6 +41,20 @@ describe('npm tarball boundary', () => {
 
   it('contains every artifact the exports map promises', () => {
     expect(tarballViolations(files).missing).toEqual([]);
+  });
+});
+
+describe('release invariants', () => {
+  it('keeps src/version.ts in sync with package.json', () => {
+    const { version } = JSON.parse(readFileSync(`${SDK_ROOT}/package.json`, 'utf8'));
+    expect(VERSION).toBe(version);
+  });
+
+  // Self-reference resolution goes through the exports map, so this fails
+  // exactly the way a consumer's require('abmeter/package.json') did in 0.1.0.
+  it('exposes ./package.json through the exports map', () => {
+    const require = createRequire(import.meta.url);
+    expect(require.resolve('abmeter/package.json')).toBe(`${SDK_ROOT}package.json`);
   });
 });
 

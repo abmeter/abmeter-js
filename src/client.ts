@@ -100,16 +100,22 @@ export function getExposure(slug: string): ExposureRecord | null {
   return guard('getExposure', null, handlers(), () => buildExposure(requireState(), slug));
 }
 
-export function trackEvent(
-  eventSlug: string,
-  userId?: string,
-  customFields?: Record<string, unknown>
-): void {
+/**
+ * Queue an event for the configured user.
+ *
+ * Deliberately takes no user id, unlike the server-side SDKs: there one
+ * process serves every user, so each call must say who it is for, while a
+ * page has exactly the one user configure() established. An override would
+ * only ever detach the event — results attribute events to a visitor by
+ * matching the id their exposure was recorded under, so an event under any
+ * other id is stored, counted, and never joined.
+ */
+export function trackEvent(eventSlug: string, customFields?: Record<string, unknown>): void {
   guard('trackEvent', undefined, handlers(), () => {
     const current = requireState();
     current.submitter.queueEvent({
       event_slug: eventSlug,
-      user_id: userId ?? current.user.userId,
+      user_id: current.user.userId,
       occurred_at: new Date().toISOString(),
       custom_fields: customFields ?? {},
     });

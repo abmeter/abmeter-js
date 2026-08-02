@@ -13,13 +13,15 @@ npm install abmeter
 Or from the CDN (exposes `window.abmeter`):
 
 ```html
-<script src="https://cdn.jsdelivr.net/npm/abmeter@0.1.1/dist/abmeter.iife.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/abmeter@0.2.0/dist/abmeter.iife.min.js"></script>
 ```
 
 Pin the version. Dropping it — `npm/abmeter/dist/...` — resolves to whatever is
 latest, which is handy for a first try and wrong in production: a release you
-did not deploy would change your site. [unpkg](https://unpkg.com/abmeter/) serves
-the same file at the same path.
+did not deploy would change your site. It is not even prompt about it — jsDelivr
+caches the version-less path at the edge, and was still serving the previous
+release minutes after a publish. [unpkg](https://unpkg.com/abmeter/) serves the
+same file at the same path.
 
 ## Quick start
 
@@ -36,7 +38,7 @@ abmeter.configure({
 
 const buttonColor = abmeter.resolveParameter('button-color');
 
-abmeter.trackEvent('purchase', undefined, { price: 4.99 });
+abmeter.trackEvent('purchase', { price: 4.99 });
 ```
 
 `apiKey` must be a **publishable key** (`pk_...`, minted on the Lab API Keys page) — it is safe to embed in browser code and is limited server-side to the three endpoints this SDK uses. `configure` refuses any other key: secret keys (`api-...`) are never browser-safe.
@@ -62,7 +64,7 @@ Content blockers may drop telemetry requests at the network layer; the SDK treat
 | `configure(options)` | Initialize the SDK. Options: `apiKey` (required), `baseUrl`, `user: { userId?, email? }`, `flushInterval` (ms, default 1000), `logger`, `errorCallback`. |
 | `resolveParameter(slug)` | Resolved value for this user, or `undefined` if unknown. Queues an exposure lazily (deduplicated over a 10-minute window). |
 | `getExposure(slug)` | The exposure metadata for a parameter (`null` for feature-flag/default resolutions), without queueing anything. |
-| `trackEvent(eventSlug, userId?, customFields?)` | Queue an event. `userId` defaults to the configured user. |
+| `trackEvent(eventSlug, customFields?)` | Queue an event for the configured user. |
 | `flush()` | Drain the queue now (returns a promise). |
 | `reset(options?)` | Drain fully and tear down timers/listeners. `configure` again to restart. |
 

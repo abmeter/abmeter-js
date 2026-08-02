@@ -191,7 +191,7 @@ describe('trackEvent', () => {
     abmeter.configure({ apiKey: 'pk_k', baseUrl: 'https://api.test', user: { userId: 'u1' }, flushInterval: 60_000 });
     await abmeter.ready();
 
-    abmeter.trackEvent('purchase', undefined, { price: 4.99 });
+    abmeter.trackEvent('purchase', { price: 4.99 });
     await abmeter.flush();
 
     const posts = requests.filter((request) => request.url.includes('/events'));

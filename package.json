@@ -1,6 +1,6 @@
 {
   "name": "abmeter",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "ABMeter browser SDK — feature flags and A/B experiments with server-side pre-evaluated assignments",
   "license": "MIT",
   "homepage": "https://abmeter.ai",
