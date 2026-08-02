@@ -106,6 +106,24 @@ describe('configure', () => {
     expect((requests[0]?.body as { user_id: string }).user_id).toBe(first);
   });
 
+  it('drains the previous configuration instead of dropping its queue', async () => {
+    abmeter.configure({ apiKey: 'pk_k', baseUrl: 'https://api.test', user: { userId: 'u1' }, flushInterval: 60_000 });
+    await abmeter.ready();
+    abmeter.trackEvent('purchase', { price: 4.99 });
+
+    // Reconfiguring for a newly logged-in user. The event queued as u1 is
+    // already collected — losing it would be a silent hole in the results.
+    abmeter.configure({ apiKey: 'pk_k', baseUrl: 'https://api.test', user: { userId: 'u2' }, flushInterval: 60_000 });
+    await abmeter.ready();
+    await abmeter.flush();
+
+    const rows = requests
+      .filter((request) => request.url.includes('/events'))
+      .flatMap((request) => request.body as Array<Record<string, unknown>>);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ event_slug: 'purchase', user_id: 'u1' });
+  });
+
   it('throws on a missing apiKey (misconfiguration is loud, not error-safe)', () => {
     expect(() => abmeter.configure({} as never)).toThrow(/apiKey/);
   });

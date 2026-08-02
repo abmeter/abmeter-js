@@ -48,10 +48,21 @@ export function configure(input: ConfigInput): void {
     errorCallback: config.errorCallback,
   });
 
+  // Reconfiguring detaches the previous submitter and lets it drain itself.
+  // configure() is synchronous, so the drain cannot be awaited or reported —
+  // but dropping the queue would lose exposures and events already collected,
+  // a silent hole in the customer's results, while a stray background drain
+  // only costs bandwidth. reset({ force: true }) is how a caller opts into
+  // discarding, and await reset() is how one gets a guaranteed drain; neither
+  // should be the accidental default here. Best-effort: reset() detaches the
+  // unload listeners first, so a page dying mid-drain still loses the tail.
   if (state) {
-    const pending = state.submitter.pending();
-    if (pending > 0) state.config.logger(`configure: dropping ${pending} queued items (reset() first to drain)`);
-    state.submitter.stop();
+    const previous = state.submitter;
+    const pending = previous.pending();
+    if (pending > 0) state.config.logger(`configure: draining ${pending} queued items from the previous configuration`);
+    void previous.reset().catch(() => {
+      // Already logged by the submitter; a failed drain must not break configure().
+    });
   }
 
   cache.hydrateFromStorage();
