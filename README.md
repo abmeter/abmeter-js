@@ -13,15 +13,15 @@ npm install abmeter
 Or from the CDN (exposes `window.abmeter`):
 
 ```html
-<script src="https://cdn.jsdelivr.net/npm/abmeter@0.2.0/dist/abmeter.iife.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/abmeter@0.2/dist/abmeter.iife.min.js"></script>
 ```
 
-Pin the version. Dropping it — `npm/abmeter/dist/...` — resolves to whatever is
-latest, which is handy for a first try and wrong in production: a release you
-did not deploy would change your site. It is not even prompt about it — jsDelivr
-caches the version-less path at the edge, and was still serving the previous
-release minutes after a publish. [unpkg](https://unpkg.com/abmeter/) serves the
-same file at the same path.
+`@0.2` is a range: it picks up patch releases on its own. Pin the exact version
+(`abmeter@0.2.1`) before production — a range still lets a release you did not
+deploy reach your site, and only an exact version is served `immutable`. Avoid
+the version-less form `npm/abmeter/dist/...` entirely: it follows every release,
+breaking ones included. [unpkg](https://unpkg.com/abmeter/) serves the same file
+at the same paths.
 
 ## Quick start
 
