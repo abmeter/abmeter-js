@@ -1,4 +1,6 @@
 import { DEFAULT_BASE_URL, DEFAULT_FLUSH_INTERVAL_MS } from './constants';
+import { createBrowserAdapter } from './platform-browser';
+import type { PlatformAdapter } from './platform';
 import type { UserInput } from './user';
 
 export type Logger = (message: string, payload?: unknown) => void;
@@ -12,6 +14,8 @@ export interface ConfigInput {
   flushInterval?: number;
   logger?: Logger;
   errorCallback?: ErrorCallback;
+  /** Storage + lifecycle seam for non-browser runtimes; defaults to the browser adapter. */
+  platform?: PlatformAdapter;
 }
 
 export interface Config {
@@ -20,6 +24,7 @@ export interface Config {
   flushIntervalMs: number;
   logger: Logger;
   errorCallback?: ErrorCallback;
+  platform: PlatformAdapter;
 }
 
 const PUBLISHABLE_KEY_PREFIX = 'pk_';
@@ -46,6 +51,7 @@ export function resolveConfig(input: ConfigInput): Config {
     flushIntervalMs: input.flushInterval ?? DEFAULT_FLUSH_INTERVAL_MS,
     logger: input.logger ?? defaultLogger,
     errorCallback: input.errorCallback,
+    platform: input.platform ?? createBrowserAdapter(),
   };
 }
 

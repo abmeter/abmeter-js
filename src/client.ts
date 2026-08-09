@@ -19,33 +19,43 @@ export interface ExposureRecord {
   resolved_at: string;
 }
 
+interface PendingEvent {
+  event_slug: string;
+  occurred_at: string;
+  custom_fields: Record<string, unknown>;
+}
+
 interface ClientState {
   config: Config;
-  user: User;
-  cache: AssignmentsCache;
+  /** null until the async identity load settles (awaited by ready()). */
+  user: User | null;
+  /** null until identity settles — the cache's storage key needs the user id. */
+  cache: AssignmentsCache | null;
   dedup: ExposureDedup;
   submitter: AsyncSubmitter;
-  refreshPromise: Promise<void>;
+  /** Events tracked before identity settles; queued once it does. */
+  pendingEvents: PendingEvent[];
+  initPromise: Promise<void>;
 }
 
 let state: ClientState | null = null;
 
 /**
- * Initialize the SDK singleton. Cache-then-network: hydrates synchronously
- * from localStorage when a cached map exists, then refreshes in the background
- * (await ready() to know the refresh settled). Throws on misconfiguration —
- * a bad apiKey must be loud, not error-safe.
+ * Initialize the SDK singleton. Synchronous, but init is not: identity loads
+ * from the platform storage, then the cache hydrates and refreshes — all
+ * awaited by ready(), the documented gate. A resolveParameter before ready()
+ * returns undefined even when a cached map exists. Throws on
+ * misconfiguration — a bad apiKey must be loud, not error-safe.
  */
 export function configure(input: ConfigInput): void {
   const config = resolveConfig(input);
-  const user = ensureUser(input.user);
   const http = new HttpClient({ baseUrl: config.baseUrl, apiKey: config.apiKey });
-  const cache = new AssignmentsCache({ http, user, logger: config.logger });
   const submitter = new AsyncSubmitter({
     http,
     flushIntervalMs: config.flushIntervalMs,
     logger: config.logger,
     errorCallback: config.errorCallback,
+    lifecycle: config.platform.lifecycle,
   });
 
   // Reconfiguring detaches the previous submitter and lets it drain itself.
@@ -65,9 +75,38 @@ export function configure(input: ConfigInput): void {
     });
   }
 
-  cache.hydrateFromStorage();
   submitter.start();
-  const refreshPromise = cache.refresh().catch((error) => {
+
+  const current: ClientState = {
+    config,
+    user: null,
+    cache: null,
+    dedup: new ExposureDedup(),
+    submitter,
+    pendingEvents: [],
+    initPromise: Promise.resolve(),
+  };
+
+  // Identity → hydrate → refresh, strictly in order: the cache's storage key
+  // is derived from the user id, and the refresh replays the hydrated ETag.
+  current.initPromise = (async () => {
+    const user = await ensureUser(input.user, config.platform.storage);
+    current.user = user;
+    const cache = new AssignmentsCache({
+      http,
+      user,
+      logger: config.logger,
+      storage: config.platform.storage,
+    });
+    current.cache = cache;
+    // Events tracked in the pre-identity window carry their original
+    // occurred_at; only the user id was pending.
+    for (const event of current.pendingEvents.splice(0)) {
+      submitter.queueEvent({ ...event, user_id: user.userId });
+    }
+    await cache.hydrateFromStorage();
+    await cache.refresh();
+  })().catch((error) => {
     config.logger('assignments refresh failed', error);
     try {
       config.errorCallback?.(error);
@@ -76,12 +115,12 @@ export function configure(input: ConfigInput): void {
     }
   });
 
-  state = { config, user, cache, dedup: new ExposureDedup(), submitter, refreshPromise };
+  state = current;
 }
 
-/** Resolves when the background assignments refresh has settled (fetched or failed). */
+/** Resolves when init (identity, cache hydrate, first refresh) has settled. */
 export function ready(): Promise<void> {
-  return state?.refreshPromise ?? Promise.resolve();
+  return state?.initPromise ?? Promise.resolve();
 }
 
 /**
@@ -92,7 +131,7 @@ export function ready(): Promise<void> {
 export function resolveParameter(slug: string): unknown {
   return guard('resolveParameter', undefined, handlers(), () => {
     const current = requireState();
-    const assignment = current.cache.resolveAssignment(slug);
+    const assignment = current.cache?.resolveAssignment(slug);
     if (!assignment) {
       current.config.logger(`resolveParameter: unknown parameter '${slug}'`);
       return undefined;
@@ -124,12 +163,18 @@ export function getExposure(slug: string): ExposureRecord | null {
 export function trackEvent(eventSlug: string, customFields?: Record<string, unknown>): void {
   guard('trackEvent', undefined, handlers(), () => {
     const current = requireState();
-    current.submitter.queueEvent({
+    const record = {
       event_slug: eventSlug,
-      user_id: current.user.userId,
       occurred_at: new Date().toISOString(),
       custom_fields: customFields ?? {},
-    });
+    };
+    if (current.user) {
+      current.submitter.queueEvent({ ...record, user_id: current.user.userId });
+    } else {
+      // Identity is still loading; hold the event and let init queue it under
+      // the resolved id — its occurred_at is already stamped.
+      current.pendingEvents.push(record);
+    }
   });
 }
 
@@ -153,7 +198,10 @@ export function reset(options: { force?: boolean } = {}): Promise<void> {
 }
 
 function buildExposure(current: ClientState, slug: string): ExposureRecord | null {
-  const assignment = current.cache.resolveAssignment(slug);
+  // Assignments only exist after init, so a non-null assignment implies the
+  // user is resolved; the user check is for the type system.
+  if (!current.user) return null;
+  const assignment = current.cache?.resolveAssignment(slug);
   if (!assignment?.exposure) return null;
 
   return {

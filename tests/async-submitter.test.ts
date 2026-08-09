@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../src/api-error';
 import { AsyncSubmitter, chunkForKeepalive } from '../src/async-submitter';
 import type { HttpClient } from '../src/http';
+import type { PlatformLifecycle } from '../src/platform';
 
 interface FakeHttp {
   postExposures: ReturnType<typeof vi.fn>;
@@ -19,15 +20,43 @@ function fakeHttp(): FakeHttp {
   };
 }
 
+interface ManualLifecycle {
+  lifecycle: PlatformLifecycle;
+  trigger: () => void;
+  subscribed: () => number;
+}
+
+function manualLifecycle(): ManualLifecycle {
+  const handlers = new Set<() => void>();
+  return {
+    lifecycle: {
+      onBackground(handler) {
+        handlers.add(handler);
+        return () => void handlers.delete(handler);
+      },
+    },
+    trigger: () => {
+      for (const handler of handlers) handler();
+    },
+    subscribed: () => handlers.size,
+  };
+}
+
 function buildSubmitter(
   http: FakeHttp,
-  overrides: { batchSize?: number; flushIntervalMs?: number; logger?: (m: string, p?: unknown) => void } = {}
+  overrides: {
+    batchSize?: number;
+    flushIntervalMs?: number;
+    logger?: (m: string, p?: unknown) => void;
+    lifecycle?: PlatformLifecycle;
+  } = {}
 ): AsyncSubmitter {
   return new AsyncSubmitter({
     http: http as unknown as HttpClient,
     flushIntervalMs: overrides.flushIntervalMs ?? 1000,
     batchSize: overrides.batchSize ?? 3,
     logger: overrides.logger ?? ((): void => {}),
+    lifecycle: overrides.lifecycle ?? manualLifecycle().lifecycle,
   });
 }
 
@@ -74,30 +103,34 @@ describe('AsyncSubmitter', () => {
     submitter.stop();
   });
 
-  it('drains on visibilitychange to hidden using the keepalive transport', () => {
+  it('drains with the keepalive transport when the lifecycle signals background', () => {
     const http = fakeHttp();
-    const submitter = buildSubmitter(http);
+    const background = manualLifecycle();
+    const submitter = buildSubmitter(http, { lifecycle: background.lifecycle });
     submitter.start();
     submitter.queueExposure({ n: 1 });
 
-    Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true });
-    document.dispatchEvent(new Event('visibilitychange'));
+    background.trigger();
 
     expect(http.postExposures).toHaveBeenCalledWith([{ n: 1 }], { keepalive: true });
     expect(submitter.pending()).toBe(0);
     submitter.stop();
   });
 
-  it('drains on pagehide', () => {
+  it('unsubscribes from the lifecycle on stop', () => {
     const http = fakeHttp();
-    const submitter = buildSubmitter(http);
+    const background = manualLifecycle();
+    const submitter = buildSubmitter(http, { lifecycle: background.lifecycle });
+
     submitter.start();
-    submitter.queueEvent({ n: 1 });
+    expect(background.subscribed()).toBe(1);
 
-    window.dispatchEvent(new Event('pagehide'));
-
-    expect(http.postEvents).toHaveBeenCalledWith([{ n: 1 }], { keepalive: true });
     submitter.stop();
+    expect(background.subscribed()).toBe(0);
+
+    submitter.queueEvent({ n: 1 });
+    background.trigger();
+    expect(http.postEvents).not.toHaveBeenCalled();
   });
 
   it('falls back to sendBeacon when the keepalive fetch fails', async () => {

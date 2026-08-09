@@ -2,7 +2,7 @@
 
 [ABMeter](https://abmeter.ai) is a feature-flag and A/B-testing platform. You define parameters, experiments, and feature flags in the ABMeter Lab; this package reads the value assigned to each visitor in the browser and reports exposures and events back.
 
-Unlike server-side SDKs, the browser never receives assignment rules, salts, or audience definitions. The SDK asks the ABMeter API for **pre-evaluated assignments** for the current user (`POST /api/v1/user-assignments`) and caches the resulting value map. Reading a value is a synchronous map lookup; an exposure is reported only when a value is actually read.
+Unlike server-side SDKs, the browser receives only the **values already assigned** to the current visitor (`POST /api/v1/user-assignments`), and caches them — your experiment setup never leaves the server, so nothing in your page source reveals what you are testing or how. Reading a value is a synchronous lookup; an exposure is reported only when a value is actually read.
 
 ## Install
 
@@ -13,11 +13,11 @@ npm install abmeter
 Or from the CDN (exposes `window.abmeter`):
 
 ```html
-<script src="https://cdn.jsdelivr.net/npm/abmeter@0.2/dist/abmeter.iife.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/abmeter@0.3/dist/abmeter.iife.min.js"></script>
 ```
 
-`@0.2` is a range: it picks up patch releases on its own. Pin the exact version
-(`abmeter@0.2.2`) before production — a range still lets a release you did not
+`@0.3` is a range: it picks up patch releases on its own. Pin the exact version
+(`abmeter@0.3.0`) before production — a range still lets a release you did not
 deploy reach your site, and only an exact version is served `immutable`. Avoid
 the version-less form `npm/abmeter/dist/...` entirely: it follows every release,
 breaking ones included. [unpkg](https://unpkg.com/abmeter/) serves the same file
@@ -43,7 +43,7 @@ abmeter.trackEvent('purchase', { price: 4.99 });
 
 `apiKey` must be a **publishable key** (`pk_...`, minted on the Lab API Keys page) — it is safe to embed in browser code and is limited server-side to the three endpoints this SDK uses. `configure` refuses any other key: secret keys (`api-...`) are never browser-safe.
 
-`configure` hydrates synchronously from `localStorage` when a cached assignment map exists (no flash of defaults on repeat visits) and refreshes it in the background with ETag caching. `resolveParameter` returns the cached value and lazily queues an exposure — a value that is fetched but never read produces no exposure.
+`configure` returns immediately; identity, the `localStorage`-cached assignment map, and the background refresh (ETag-cached) all settle behind `ready()` — await it before reading parameters. `resolveParameter` returns the cached value and lazily queues an exposure — a value that is fetched but never read produces no exposure.
 
 ## Identity
 

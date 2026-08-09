@@ -7,6 +7,7 @@ import {
 } from './constants';
 import type { ErrorCallback, Logger } from './config';
 import type { HttpClient } from './http';
+import type { PlatformLifecycle } from './platform';
 
 type Kind = 'exposure' | 'event';
 
@@ -22,19 +23,23 @@ export interface SubmitterOptions {
   batchSize?: number;
   logger: Logger;
   errorCallback?: ErrorCallback;
+  /** Drain-moment source (browser: visibilitychange/pagehide; RN: AppState). */
+  lifecycle: PlatformLifecycle;
 }
 
-// Main-thread queue: setInterval + batch-size trigger, drained hard on
-// visibilitychange→hidden and pagehide (never unload/beforeunload — those
-// break bfcache and don't fire on mobile). The hidden drain uses keepalive
-// fetch with a sendBeacon fallback; a refused beacon is logged and dropped —
-// ad-blockers exist, loss is expected, never fatal.
+// Main-thread queue: setInterval + batch-size trigger, drained hard when the
+// platform lifecycle signals background. The drain uses keepalive fetch with a
+// sendBeacon fallback; a refused beacon is logged and dropped — ad-blockers
+// exist, loss is expected, never fatal. (On React Native neither transport
+// trick exists or is needed: fetch ignores keepalive and the beacon branch is
+// never viable, so the drain is a plain fetch.)
 export class AsyncSubmitter {
   private readonly http: HttpClient;
   private readonly flushIntervalMs: number;
   private readonly batchSize: number;
   private readonly logger: Logger;
   private readonly errorCallback?: ErrorCallback;
+  private readonly lifecycle: PlatformLifecycle;
 
   private exposures: QueueItem[] = [];
   private events: QueueItem[] = [];
@@ -43,12 +48,7 @@ export class AsyncSubmitter {
   private timer: ReturnType<typeof setInterval> | null = null;
   private flushChain: Promise<void> = Promise.resolve();
   private queuedFlush: Promise<void> | null = null;
-  private readonly onVisibilityChange = (): void => {
-    if (globalThis.document?.visibilityState === 'hidden') this.drainOnHide();
-  };
-  private readonly onPageHide = (): void => {
-    this.drainOnHide();
-  };
+  private unsubscribeBackground: (() => void) | null = null;
 
   constructor(options: SubmitterOptions) {
     this.http = options.http;
@@ -56,14 +56,14 @@ export class AsyncSubmitter {
     this.batchSize = options.batchSize ?? BATCH_SIZE;
     this.logger = options.logger;
     this.errorCallback = options.errorCallback;
+    this.lifecycle = options.lifecycle;
   }
 
   start(): void {
     if (this.timer === null) {
       this.timer = setInterval(() => void this.flush(), this.flushIntervalMs);
     }
-    globalThis.document?.addEventListener('visibilitychange', this.onVisibilityChange);
-    globalThis.window?.addEventListener('pagehide', this.onPageHide);
+    this.unsubscribeBackground ??= this.lifecycle.onBackground(() => this.drainOnHide());
   }
 
   /** Detach timer + listeners without draining. reset() is the draining teardown. */
@@ -72,8 +72,8 @@ export class AsyncSubmitter {
       clearInterval(this.timer);
       this.timer = null;
     }
-    globalThis.document?.removeEventListener('visibilitychange', this.onVisibilityChange);
-    globalThis.window?.removeEventListener('pagehide', this.onPageHide);
+    this.unsubscribeBackground?.();
+    this.unsubscribeBackground = null;
   }
 
   queueExposure(data: Record<string, unknown>): void {

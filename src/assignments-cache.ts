@@ -1,6 +1,7 @@
 import { ASSIGNMENTS_STORAGE_PREFIX } from './constants';
 import type { HttpClient } from './http';
 import type { Logger } from './config';
+import type { PlatformStorage } from './platform';
 import type { User } from './user';
 
 export interface ExposureMetadata {
@@ -27,27 +28,42 @@ interface StoredEntry {
   payload: AssignmentsPayload;
 }
 
-// The value map + hydration. Cache-then-network: hydrate synchronously from
-// localStorage (unblocks first paint), then refresh in the background with
-// If-None-Match. localStorage blocked → in-memory only; still works, just no
-// cross-session cache.
+// The value map + hydration. Cache-then-network: hydrate from the platform
+// storage, then refresh with If-None-Match — both awaited by ready(), in that
+// order, so the cached ETag is replayed. Storage blocked → in-memory only;
+// still works, just no cross-session cache.
 export class AssignmentsCache {
   private readonly http: HttpClient;
   private readonly user: User;
   private readonly logger: Logger;
-  private readonly storage: Storage | null;
+  private readonly storage: PlatformStorage;
   private assignments: Record<string, Assignment> = {};
   private etag?: string;
 
-  constructor({ http, user, logger }: { http: HttpClient; user: User; logger: Logger }) {
+  constructor({
+    http,
+    user,
+    logger,
+    storage,
+  }: {
+    http: HttpClient;
+    user: User;
+    logger: Logger;
+    storage: PlatformStorage;
+  }) {
     this.http = http;
     this.user = user;
     this.logger = logger;
-    this.storage = detectStorage();
+    this.storage = storage;
   }
 
-  hydrateFromStorage(): boolean {
-    const raw = this.storageRead(this.storageKey());
+  async hydrateFromStorage(): Promise<boolean> {
+    let raw: string | null;
+    try {
+      raw = await this.storage.getItem(this.storageKey());
+    } catch {
+      return false;
+    }
     if (!raw) return false;
 
     try {
@@ -90,34 +106,15 @@ export class AssignmentsCache {
   }
 
   private persist(entry: StoredEntry): void {
+    const onError = (error: unknown): void => this.logger('assignments cache not persisted', error);
     try {
-      this.storage?.setItem(this.storageKey(), JSON.stringify(entry));
+      void this.storage.setItem(this.storageKey(), JSON.stringify(entry)).catch(onError);
     } catch (error) {
-      this.logger('assignments cache not persisted', error);
-    }
-  }
-
-  private storageRead(key: string): string | null {
-    try {
-      return this.storage?.getItem(key) ?? null;
-    } catch {
-      return null;
+      onError(error);
     }
   }
 
   private storageKey(): string {
     return `${ASSIGNMENTS_STORAGE_PREFIX}${this.user.userId}`;
-  }
-}
-
-function detectStorage(): Storage | null {
-  try {
-    const storage = globalThis.localStorage;
-    const probe = 'abmeter:probe';
-    storage.setItem(probe, '1');
-    storage.removeItem(probe);
-    return storage;
-  } catch {
-    return null;
   }
 }

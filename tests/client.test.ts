@@ -33,6 +33,8 @@ function installFetchMock(payload: unknown = PAYLOAD): void {
     vi.fn(async (url: string, init?: RequestInit) => {
       requests.push({ url: String(url), body: init?.body ? JSON.parse(String(init.body)) : undefined });
       if (String(url).includes('/user-assignments')) {
+        const etag = ((init?.headers ?? {}) as Record<string, string>)['If-None-Match'];
+        if (etag === 'W/"v1"') return new Response(null, { status: 304 });
         return new Response(JSON.stringify(payload), {
           status: 200,
           headers: { ETag: 'W/"v1"', 'Content-Type': 'application/json' },
@@ -60,11 +62,11 @@ afterEach(async () => {
 });
 
 describe('configure', () => {
-  it('hydrates synchronously from localStorage, then refreshes over the network', async () => {
+  it('hydrates from localStorage before the refresh, which replays the cached ETag', async () => {
     localStorage.setItem(
       'abmeter:assignments:u1',
       JSON.stringify({
-        etag: 'W/"v0"',
+        etag: 'W/"v1"',
         payload: {
           user: { user_id: 'u1' },
           assignments: {
@@ -76,11 +78,27 @@ describe('configure', () => {
 
     abmeter.configure({ apiKey: 'pk_k', baseUrl: 'https://api.test', user: { userId: 'u1' }, flushInterval: 60_000 });
 
-    expect(abmeter.resolveParameter('button-color')).toBe('cached-blue');
+    // Init (identity + hydrate) is async; ready() is the documented gate.
+    expect(abmeter.resolveParameter('button-color')).toBeUndefined();
     await abmeter.ready();
-    // ready() awaits the refresh: the stale W/"v0" entry is replaced by the
-    // mock's 200 + W/"v1" response, whose button-color is 'green'.
-    expect(abmeter.resolveParameter('button-color')).toBe('green');
+    // The refresh replayed the hydrated W/"v1" and got a 304, so the cached
+    // map survived — proof hydration completed before the refresh.
+    expect(abmeter.resolveParameter('button-color')).toBe('cached-blue');
+  });
+
+  it('holds an event tracked before identity resolves and queues it under the track id', async () => {
+    abmeter.configure({ apiKey: 'pk_k', baseUrl: 'https://api.test', flushInterval: 60_000 });
+    abmeter.trackEvent('early-tap', { n: 1 });
+
+    await abmeter.ready();
+    await abmeter.flush();
+
+    const rows = requests
+      .filter((request) => request.url.includes('/events'))
+      .flatMap((request) => request.body as Array<Record<string, unknown>>);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ event_slug: 'early-tap', custom_fields: { n: 1 } });
+    expect(rows[0]?.user_id).toMatch(/^[0-9a-f-]{36}$/);
   });
 
   it('generates and persists a track id when no userId is supplied', async () => {
