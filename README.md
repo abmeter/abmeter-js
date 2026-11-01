@@ -13,11 +13,11 @@ npm install abmeter
 Or from the CDN (exposes `window.abmeter`):
 
 ```html
-<script src="https://cdn.jsdelivr.net/npm/abmeter@0.3/dist/abmeter.iife.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/abmeter@0.4/dist/abmeter.iife.min.js"></script>
 ```
 
-`@0.3` is a range: it picks up patch releases on its own. Pin the exact version
-(`abmeter@0.3.0`) before production — a range still lets a release you did not
+`@0.4` is a range: it picks up patch releases on its own. Pin the exact version
+(`abmeter@0.4.0`) before production — a range still lets a release you did not
 deploy reach your site, and only an exact version is served `immutable`. Avoid
 the version-less form `npm/abmeter/dist/...` entirely: it follows every release,
 breaking ones included. [unpkg](https://unpkg.com/abmeter/) serves the same file
@@ -81,6 +81,8 @@ until an auth request returns. Two options that work:
 Exposures and events are queued and submitted in small batches in the background. The queue drains on `visibilitychange → hidden` and `pagehide` using `fetch(..., { keepalive: true })` with a `sendBeacon` fallback, so data survives tab closes without blocking navigation. Call `abmeter.flush()` on SPA route changes if you want an eager drain.
 
 Content blockers may drop telemetry requests at the network layer; the SDK treats that as expected loss and never throws.
+
+On a 429 the SDK pauses submits for the `Retry-After` seconds (30 s when the header is missing or unreadable, at most 600 s) and retries the batch afterwards; a rate-limit wait never counts toward the retry limit. The API exposes `Retry-After` and the `X-RateLimit-*` headers to cross-origin pages, so the browser can read them.
 
 ## API
 

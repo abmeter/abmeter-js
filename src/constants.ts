@@ -8,6 +8,14 @@ export const BATCH_SIZE = 20;
 export const MAX_SUBMIT_ATTEMPTS = 3;
 export const MAX_RETRY_QUEUE = 1000;
 
+// 429 handling: pause for Retry-After seconds (default when missing or
+// unparsable, capped at the API's rate-limit window). reset() waits out
+// pauses for at most MAX_DRAIN_PAUSE_MS in total, then drops what is left.
+export const DEFAULT_RETRY_AFTER_SECONDS = 30;
+export const MIN_RETRY_AFTER_SECONDS = 1;
+export const MAX_RETRY_AFTER_SECONDS = 600;
+export const MAX_DRAIN_PAUSE_MS = 5000;
+
 export const DEDUP_WINDOW_MS = 10 * 60 * 1000;
 export const DEDUP_MAX_KEYS = 1000;
 

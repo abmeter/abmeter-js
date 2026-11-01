@@ -49,6 +49,7 @@ function buildSubmitter(
     flushIntervalMs?: number;
     logger?: (m: string, p?: unknown) => void;
     lifecycle?: PlatformLifecycle;
+    errorCallback?: (error: unknown) => void;
   } = {}
 ): AsyncSubmitter {
   return new AsyncSubmitter({
@@ -57,7 +58,16 @@ function buildSubmitter(
     batchSize: overrides.batchSize ?? 3,
     logger: overrides.logger ?? ((): void => {}),
     lifecycle: overrides.lifecycle ?? manualLifecycle().lifecycle,
+    errorCallback: overrides.errorCallback,
   });
+}
+
+function rateLimited(retryAfter: string | null = '2'): ApiError {
+  return new ApiError(429, { error: 'Rate limit exceeded' }, retryAfter);
+}
+
+function logLines(logger: ReturnType<typeof vi.fn>, fragment: string): string[] {
+  return logger.mock.calls.map(([message]) => String(message)).filter((m) => m.includes(fragment));
 }
 
 // Microtask turns drained by settle(). A flush resolves through a chain of
@@ -262,6 +272,168 @@ describe('AsyncSubmitter', () => {
     await submitter.reset({ force: true });
 
     expect(http.postExposures).not.toHaveBeenCalled();
+    expect(submitter.pending()).toBe(0);
+  });
+});
+
+describe('AsyncSubmitter on 429', () => {
+  it('pauses for Retry-After, then delivers every item', async () => {
+    const logger = vi.fn();
+    const errorCallback = vi.fn();
+    const http = fakeHttp();
+    http.postExposures.mockRejectedValueOnce(rateLimited('2'));
+    const submitter = buildSubmitter(http, { logger, errorCallback });
+
+    submitter.queueExposure({ n: 1 });
+    await submitter.flush();
+    expect(submitter.pending()).toBe(1);
+    expect(errorCallback).toHaveBeenCalledTimes(1);
+    expect(logLines(logger, 'rate limited')).toEqual([
+      'rate limited, pausing submits for 2s; re-queueing 1 exposures',
+    ]);
+
+    submitter.queueEvent({ n: 2 });
+    await vi.advanceTimersByTimeAsync(1999);
+    await submitter.flush();
+    expect(http.postExposures).toHaveBeenCalledTimes(1);
+    expect(http.postEvents).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1);
+    await submitter.flush();
+    expect(http.postExposures).toHaveBeenLastCalledWith([{ n: 1 }]);
+    expect(http.postEvents).toHaveBeenCalledWith([{ n: 2 }]);
+    expect(submitter.pending()).toBe(0);
+  });
+
+  it('does not count a 429 as an attempt', async () => {
+    const http = fakeHttp();
+    for (let i = 0; i < 5; i += 1) http.postExposures.mockRejectedValueOnce(rateLimited('1'));
+    const submitter = buildSubmitter(http);
+
+    submitter.queueExposure({ n: 1 });
+    await submitter.flush();
+    for (let i = 0; i < 5; i += 1) {
+      await vi.advanceTimersByTimeAsync(1000);
+      await submitter.flush();
+    }
+
+    expect(http.postExposures).toHaveBeenCalledTimes(6);
+    expect(http.postExposures).toHaveBeenLastCalledWith([{ n: 1 }]);
+    expect(submitter.pending()).toBe(0);
+  });
+
+  it('stops taking batches from the main queue once paused', async () => {
+    const http = fakeHttp();
+    http.postExposures.mockRejectedValueOnce(rateLimited('1'));
+    const submitter = buildSubmitter(http, { batchSize: 3 });
+
+    for (let n = 0; n < 9; n += 1) submitter.queueExposure({ n });
+    submitter.queueEvent({ n: 'e' });
+    await submitter.flush();
+
+    expect(http.postExposures).toHaveBeenCalledTimes(1);
+    expect(http.postEvents).not.toHaveBeenCalled();
+    expect(submitter.pending()).toBe(10);
+
+    await vi.advanceTimersByTimeAsync(1000);
+    await submitter.flush();
+    const delivered = http.postExposures.mock.calls.slice(1).flatMap(([rows]) => rows as unknown[]);
+    expect(delivered).toHaveLength(9);
+    expect(http.postEvents).toHaveBeenCalledWith([{ n: 'e' }]);
+    expect(submitter.pending()).toBe(0);
+  });
+
+  it('drops what does not fit a full retry queue and logs the count once', async () => {
+    const logger = vi.fn();
+    const http = fakeHttp();
+    http.postExposures.mockRejectedValue(new ApiError(503, { error: 'down' }));
+    http.postEvents.mockRejectedValueOnce(rateLimited('1'));
+    const submitter = buildSubmitter(http, { batchSize: 600, logger });
+
+    for (let n = 0; n < 1200; n += 1) submitter.queueExposure({ n });
+    await submitter.flush();
+    expect(logLines(logger, 'retry queue full')).toEqual(['retry queue full, dropping 200 items']);
+    expect(submitter.pending()).toBe(1000);
+
+    for (let n = 0; n < 600; n += 1) submitter.queueEvent({ n });
+    await submitter.flush();
+    expect(logLines(logger, 'retry queue full')).toEqual([
+      'retry queue full, dropping 200 items',
+      'retry queue full, dropping 600 items',
+    ]);
+    expect(submitter.pending()).toBe(1000);
+  });
+
+  it('does not pause on a 5xx', async () => {
+    const http = fakeHttp();
+    http.postExposures.mockRejectedValueOnce(new ApiError(503, { error: 'down' }));
+    const submitter = buildSubmitter(http);
+
+    submitter.queueExposure({ n: 1 });
+    await submitter.flush();
+    await submitter.flush();
+
+    expect(http.postExposures).toHaveBeenCalledTimes(2);
+    expect(submitter.pending()).toBe(0);
+  });
+
+  it('reset waits out a short pause and delivers', async () => {
+    const http = fakeHttp();
+    http.postExposures.mockRejectedValueOnce(rateLimited('2'));
+    const submitter = buildSubmitter(http);
+    submitter.queueExposure({ n: 1 });
+
+    const done = submitter.reset();
+    await vi.advanceTimersByTimeAsync(2000);
+    await done;
+
+    expect(http.postExposures).toHaveBeenCalledTimes(2);
+    expect(submitter.pending()).toBe(0);
+  });
+
+  it('reset drops and logs the count when a pause outlasts the budget', async () => {
+    const logger = vi.fn();
+    const http = fakeHttp();
+    http.postExposures.mockRejectedValue(rateLimited('600'));
+    const submitter = buildSubmitter(http, { logger });
+    submitter.queueExposure({ n: 1 });
+    submitter.queueEvent({ n: 2 });
+
+    await submitter.reset();
+
+    expect(http.postEvents).not.toHaveBeenCalled();
+    expect(submitter.pending()).toBe(0);
+    expect(logLines(logger, 'dropped')).toEqual([
+      'reset: rate-limit pause outlasts the drain budget: dropped 2 queued items',
+    ]);
+  });
+
+  it('reset caps the total wait across pauses', async () => {
+    const logger = vi.fn();
+    const http = fakeHttp();
+    http.postExposures.mockRejectedValue(rateLimited('2'));
+    const submitter = buildSubmitter(http, { logger });
+    submitter.queueExposure({ n: 1 });
+
+    const done = submitter.reset();
+    await vi.advanceTimersByTimeAsync(4000);
+    await done;
+
+    expect(http.postExposures).toHaveBeenCalledTimes(3);
+    expect(submitter.pending()).toBe(0);
+    expect(logLines(logger, 'dropped 1 queued items')).toHaveLength(1);
+  });
+
+  it('drainOnHide sends even while paused', async () => {
+    const http = fakeHttp();
+    http.postExposures.mockRejectedValueOnce(rateLimited('60'));
+    const submitter = buildSubmitter(http);
+    submitter.queueExposure({ n: 1 });
+    await submitter.flush();
+
+    submitter.drainOnHide();
+
+    expect(http.postExposures).toHaveBeenLastCalledWith([{ n: 1 }], { keepalive: true });
     expect(submitter.pending()).toBe(0);
   });
 });

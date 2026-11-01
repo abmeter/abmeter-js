@@ -1,7 +1,9 @@
 import { ApiError } from './api-error';
 import {
   BATCH_SIZE,
+  DEFAULT_RETRY_AFTER_SECONDS,
   KEEPALIVE_BODY_LIMIT_BYTES,
+  MAX_DRAIN_PAUSE_MS,
   MAX_RETRY_QUEUE,
   MAX_SUBMIT_ATTEMPTS,
 } from './constants';
@@ -44,6 +46,8 @@ export class AsyncSubmitter {
   private exposures: QueueItem[] = [];
   private events: QueueItem[] = [];
   private retryQueue: QueueItem[] = [];
+  /** Date.now() ms until which a 429 pauses every flush. */
+  private pausedUntil = 0;
 
   private timer: ReturnType<typeof setInterval> | null = null;
   private flushChain: Promise<void> = Promise.resolve();
@@ -113,42 +117,67 @@ export class AsyncSubmitter {
     return pass;
   }
 
+  // Checks the pause before every batch it takes, so a 429 mid-drain leaves
+  // the unbounded main queue in place instead of pushing it all into the
+  // bounded retry queue.
   private async drain(): Promise<void> {
+    if (this.paused()) return;
     await this.retryOneBatch();
-    while (this.exposures.length > 0 || this.events.length > 0) {
+    while ((this.exposures.length > 0 || this.events.length > 0) && !this.paused()) {
       if (this.exposures.length > 0) {
         await this.submitBatch('exposure', this.exposures.splice(0, this.batchSize));
       }
-      if (this.events.length > 0) {
+      if (this.events.length > 0 && !this.paused()) {
         await this.submitBatch('event', this.events.splice(0, this.batchSize));
       }
     }
   }
 
+  private paused(): boolean {
+    return Date.now() < this.pausedUntil;
+  }
+
   /**
    * Drain fully and tear down. Terminates even against a failing server: every
    * failed batch either drops (validation, events on network error) or re-queues
-   * with attempts++ and drops at MAX_SUBMIT_ATTEMPTS.
+   * with attempts++ and drops at MAX_SUBMIT_ATTEMPTS. A 429 does not count as an
+   * attempt, so rate-limit pauses are waited out for at most MAX_DRAIN_PAUSE_MS
+   * in total; past that budget everything left is dropped.
    */
   async reset(options: { force?: boolean } = {}): Promise<void> {
     this.stop();
     if (options.force) {
-      const dropped = this.pending();
-      this.exposures = [];
-      this.events = [];
-      this.retryQueue = [];
-      if (dropped > 0) this.logger(`reset(force): dropped ${dropped} queued items`);
+      this.dropAll('reset(force)');
       return;
     }
+    let waitedMs = 0;
     while (this.pending() > 0) {
+      const pauseMs = this.pausedUntil - Date.now();
+      if (pauseMs > 0) {
+        if (waitedMs + pauseMs > MAX_DRAIN_PAUSE_MS) {
+          this.dropAll('reset: rate-limit pause outlasts the drain budget');
+          return;
+        }
+        waitedMs += pauseMs;
+        await new Promise((resolve) => setTimeout(resolve, pauseMs));
+      }
       await this.flush();
     }
+  }
+
+  private dropAll(reason: string): void {
+    const dropped = this.pending();
+    this.exposures = [];
+    this.events = [];
+    this.retryQueue = [];
+    if (dropped > 0) this.logger(`${reason}: dropped ${dropped} queued items`);
   }
 
   /**
    * Tab-death drain: chunked keepalive fetch (text/plain, CORS-simple) with a
    * sendBeacon fallback when the fetch fails. Fire-and-forget by necessity —
-   * the page may be gone before any response arrives.
+   * the page may be gone before any response arrives — so it ignores a
+   * rate-limit pause.
    */
   drainOnHide(): void {
     const items = [...this.retryQueue, ...this.exposures, ...this.events];
@@ -196,7 +225,11 @@ export class AsyncSubmitter {
       byKind.set(item.kind, bucket);
     }
     for (const [kind, items] of byKind) {
-      await this.submitBatch(kind, items);
+      if (this.paused()) {
+        this.enqueueRetry(items);
+      } else {
+        await this.submitBatch(kind, items);
+      }
     }
   }
 
@@ -213,13 +246,19 @@ export class AsyncSubmitter {
     }
   }
 
-  // The asymmetric retry contract shared with Ruby/Python: retryable API
+  // The asymmetric retry contract shared with Ruby/Python: 429 → pause for
+  // Retry-After and re-queue without counting an attempt; other retryable API
   // error → re-queue (max attempts); validation/permanent → drop; unknown
   // network error → exposures re-queued (they feed the completeness gate),
   // events dropped.
   private handleSubmitError(kind: Kind, items: QueueItem[], error: unknown): void {
     if (error instanceof ApiError) {
-      if (error.retryable) {
+      if (error.rateLimited) {
+        const seconds = error.retryAfterSeconds ?? DEFAULT_RETRY_AFTER_SECONDS;
+        this.pausedUntil = Math.max(this.pausedUntil, Date.now() + seconds * 1000);
+        this.logger(`rate limited, pausing submits for ${seconds}s; re-queueing ${items.length} ${kind}s`);
+        this.enqueueRetry(items);
+      } else if (error.retryable) {
         this.logger(`retryable API error for ${items.length} ${kind}s`, error.message);
         this.requeue(items);
       } else if (error.partialFailure) {
@@ -237,16 +276,23 @@ export class AsyncSubmitter {
   }
 
   private requeue(items: QueueItem[]): void {
+    const survivors: QueueItem[] = [];
     for (const item of items) {
       item.attempts += 1;
       if (item.attempts >= MAX_SUBMIT_ATTEMPTS) {
         this.logger(`max retries exceeded, dropping ${item.kind}`);
-      } else if (this.retryQueue.length >= MAX_RETRY_QUEUE) {
-        this.logger(`retry queue full, dropping ${item.kind}`);
       } else {
-        this.retryQueue.push(item);
+        survivors.push(item);
       }
     }
+    this.enqueueRetry(survivors);
+  }
+
+  private enqueueRetry(items: QueueItem[]): void {
+    const room = Math.max(0, MAX_RETRY_QUEUE - this.retryQueue.length);
+    this.retryQueue.push(...items.slice(0, room));
+    const dropped = items.length - room;
+    if (dropped > 0) this.logger(`retry queue full, dropping ${dropped} items`);
   }
 }
 

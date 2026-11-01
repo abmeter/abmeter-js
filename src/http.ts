@@ -42,7 +42,7 @@ export class HttpClient {
     });
 
     if (response.status === 304) return { status: 304 };
-    if (!response.ok) throw new ApiError(response.status, await parseBody(response));
+    if (!response.ok) throw new ApiError(response.status, await parseBody(response), response.headers.get('Retry-After'));
 
     return {
       status: 200,
@@ -85,7 +85,7 @@ export class HttpClient {
       body: JSON.stringify(rows),
       keepalive,
     });
-    if (!response.ok) throw new ApiError(response.status, await parseBody(response));
+    if (!response.ok) throw new ApiError(response.status, await parseBody(response), response.headers.get('Retry-After'));
   }
 
   private beacon(path: string, rows: unknown[]): boolean {
